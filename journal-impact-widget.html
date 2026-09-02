@@ -1,14 +1,14 @@
 <!--
   Lab Publication Impact Widget
   ------------------------------------------------------------------
-  Reads your lab's publications, resolves each to a journal ISSN via Crossref,
+  Reads lab's publications, resolves each to a journal ISSN via Crossref,
   looks the ISSN up in a SCImago-derived rankings file, and summarises the
-  papers by quartile threshold (top 25% = Q1, top 50% = Q1+Q2) within your
+  papers by quartile threshold (top 25% = Q1, top 50% = Q1+Q2) within 
   chosen research domain.
 
   This single file is both a live demo (open it in a browser as-is) and the
   deployable widget. To go live, edit the CONFIG block below. Everything is
-  scoped under #lab-impact-widget so it won't collide with your site's styles.
+  scoped under #lab-impact-widget so it won't collide with lab's site styles.
 
   Data sources (all free, no API key):
     - Rankings : SCImago Journal Rank quartiles, built into rankings.json by
@@ -29,10 +29,10 @@
      ================================================================= */
   const CONFIG = {
     // ---- Where do the publications come from? -----------------------------
-    // "sample"          : built-in demo data (works offline; for previewing).
+    // "sample"          : built-in standalonedemo data (works offline; for previewing).
     // "dom"             : scrape DOIs/titles from an element already on your page.
-    // "crossref-author" : pull the author's works live from Crossref by ORCID.
-    // "doi-list"        : an explicit list of DOIs in `doiList` below.
+    // "crossref-author" : pull the author's works live from Crossref by ORCID. To look at specific lab member's impact.
+    // "doi-list"        : an explicit list of DOIs in `doiList` below. Pool individually selected DOIs. 
     source: "sample",
 
     // For source:"dom" — a CSS selector for the container holding your
@@ -40,44 +40,78 @@
     // falls back to matching by the item's title text when no DOI is present.
     domSelector: "#publications",
 
-    // For source:"crossref-author" — the lab head's (or lab's) ORCID iD.
+    // For source:"crossref-author" — the lab member's ORCID iD.
     authorOrcid: "0000-0000-0000-0000",
     maxAuthorWorks: 400,
 
     // For source:"doi-list".
     doiList: [],
 
-    // Polite-pool contact for Crossref (they may email you about heavy use).
-    mailto: "your-lab@university.edu",
-
     // ---- Rankings file ----------------------------------------------------
-    // URL of rankings.json produced by build-rankings.mjs, hosted on your site
+    // URL of rankings.json produced by build-rankings.mjs, hosted on site
     // (same origin avoids CORS). Leave "" to use the small built-in SAMPLE set.
     // Add a version/date so browsers pick up yearly rebuilds: "/rankings.json?v=2025"
     rankingsUrl: "",
 
-    // ---- Your research domain --------------------------------------------
-    // SCImago subject categories that count as "your field". A journal carries
+    // ---- Research domain --------------------------------------------
+    // SCImago subject categories that count as the "lab's field". A journal carries
     // a separate quartile for EACH category it belongs to, so listing "Aging"
     // here is what makes an ageing journal count under your neuro umbrella.
     // (Names must match SCImago's spelling — see the list printed by the build
     // script, or scimagojr.com category filter.)
     domainCategories: [
+      // Neuroscience (all nine ASJC 2800 subcategories)
       "Neuroscience (miscellaneous)",
-      "Neurology",
-      "Neurology (clinical)",
-      "Cellular and Molecular Neuroscience",
       "Behavioral Neuroscience",
+      "Biological Psychiatry",
+      "Cellular and Molecular Neuroscience",
       "Cognitive Neuroscience",
       "Developmental Neuroscience",
-      "Sensory Systems",
       "Endocrine and Autonomic Systems",
-      "Biological Psychiatry",
+      "Neurology",
+      "Sensory Systems",
+      // Psychology (all seven ASJC 3200 subcategories)
+      "Psychology (miscellaneous)",
+      "Applied Psychology",
+      "Clinical Psychology",
+      "Developmental and Educational Psychology",
+      "Experimental and Cognitive Psychology",
+      "Neuropsychology and Physiological Psychology",
+      "Social Psychology",
+      // Medicine: neuro-relevant
+      "Neurology (clinical)",
       "Psychiatry and Mental Health",
-      "Aging",
-      "Immunology",
+      "Radiology, Nuclear Medicine and Imaging",
+      "Rehabilitation",
+      "Physiology (medical)",
+      "Pharmacology (medical)",
+      "Geriatrics and Gerontology",
+      "Anesthesiology and Pain Medicine",
+      "Endocrinology, Diabetes and Metabolism",
       "Immunology and Allergy",
-      "Physiology"
+      // Biochemistry, Genetics and Molecular Biology
+      "Aging",
+      "Biophysics",
+      "Cell Biology",
+      "Molecular Biology",
+      "Developmental Biology",
+      "Endocrinology",
+      "Physiology",
+      // Adjacent fields
+      "Immunology",
+      "Speech and Hearing",
+      "Gerontology",
+      "Language and Linguistics",
+      "Linguistics and Language",
+      "Pharmacology",
+      // Computational / methods
+      "Artificial Intelligence",
+      "Computer Science Applications",
+      "Human-Computer Interaction",
+      "Signal Processing",
+      "Biomedical Engineering",
+      // Broad-audience venues
+      "Multidisciplinary"
     ],
 
     // When a journal sits in several of your domain categories, which quartile
@@ -93,7 +127,7 @@
     fallbackToBestQuartile: true,
 
     // ---- Optional: break the summary out by research domain ---------------
-    // Your lab spans several fields. The combined view above already judges
+    // If lab spans several fields. The combined view above already judges
     // every paper within its own field's quartile. If you ALSO want the split
     // by domain, define named domains here; each is a set of SCImago categories,
     // and every domain is scored against ITS OWN categories (so the same
@@ -126,7 +160,8 @@
     // ---- Behaviour --------------------------------------------------------
     cacheHours: 24 * 30,     // how long to cache a paper's resolved journal
     concurrency: 4,          // parallel Crossref requests (be polite)
-    showUnranked: true       // list papers we couldn't place
+    showUnranked: true,      // list papers we couldn't place
+    showJournalBadges: true  // SCImago per-journal trend graph for each matched journal
   };
 
   /* =================================================================
@@ -147,12 +182,15 @@
     { title: "Exploratory pilot in a small cohort",      journal: "Frontiers in Aging Neuroscience",   issn: "16634365", year: 2023, doi: "10.3389/fnagi.2023.00001" }
   ];
 
-  // ISSN (hyphen-stripped) -> { title, quartiles: { category: "Q1" } }.
+  // ISSN (hyphen-stripped) -> { title, sid, quartiles: { category: "Q1" } }.
+  // `sid` is the Scopus Source ID (SCImago's `Sourceid` column) — it drives the
+  // per-journal trend badge. Only two are filled in here for the demo; the real
+  // rankings.json carries one for every journal.
   const SAMPLE_RANKINGS = {
     meta: { note: "SAMPLE DATA — replace with rankings.json from build-rankings.mjs", year: "demo" },
     journals: {
-      "10976256": { title: "Nature Neuroscience",            quartiles: { "Neuroscience (miscellaneous)": "Q1" } },
-      "08966273": { title: "Neuron",                         quartiles: { "Neuroscience (miscellaneous)": "Q1", "Cellular and Molecular Neuroscience": "Q1" } },
+      "10976256": { title: "Nature Neuroscience",            sid: "17436", quartiles: { "Neuroscience (miscellaneous)": "Q1" } },
+      "08966273": { title: "Neuron",                         sid: "17978", quartiles: { "Neuroscience (miscellaneous)": "Q1", "Cellular and Molecular Neuroscience": "Q1" } },
       "1471003X": { title: "Nature Reviews Neuroscience",    quartiles: { "Neuroscience (miscellaneous)": "Q1" } },
       "14602156": { title: "Brain",                          quartiles: { "Neurology (clinical)": "Q1", "Neurology": "Q1" } },
       "14749726": { title: "Aging Cell",                     quartiles: { "Aging": "Q1", "Cellular and Molecular Neuroscience": "Q1", "Immunology": "Q1" } },
@@ -231,6 +269,14 @@
     #lab-impact-widget .liw-dnums{min-width:0;}
   }
 
+  #lab-impact-widget details.liw-badges{margin-top:16px;border-top:1px solid var(--liw-line);}
+  #lab-impact-widget details.liw-badges>summary{display:flex;align-items:center;gap:8px;list-style:none;cursor:pointer;padding:12px 2px;font-size:0.9rem;font-weight:600;}
+  #lab-impact-widget details.liw-badges>summary::-webkit-details-marker{display:none;}
+  #lab-impact-widget details.liw-badges[open] .liw-chev{transform:rotate(90deg);}
+  #lab-impact-widget .liw-badge-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:16px;padding:6px 0 4px;}
+  #lab-impact-widget a.liw-badge{display:flex;flex-direction:column;align-items:center;gap:6px;text-decoration:none;color:var(--liw-soft);font-size:0.72rem;text-align:center;}
+  #lab-impact-widget a.liw-badge img{width:100%;max-width:150px;height:auto;border-radius:6px;border:1px solid var(--liw-line);background:var(--liw-surface);}
+  #lab-impact-widget a.liw-badge:hover .liw-badge-t{color:var(--liw-ink);}
   #lab-impact-widget .liw-loading,#lab-impact-widget .liw-error{padding:18px 4px;color:var(--liw-soft);font-size:0.9rem;}
   #lab-impact-widget .liw-error{color:#8a2020;}
   #lab-impact-widget .liw-foot{margin-top:12px;font-size:0.72rem;color:var(--liw-faint);}
@@ -286,9 +332,7 @@
     return s;
   })();
 
-  // Best (or priority) quartile among the categories in `allowed`. This is the
-  // core primitive: give it the union set for the combined view, or a single
-  // domain's set to score that journal *within that domain*.
+  // Best (or priority) quartile among the categories in `allowed`.
   function quartileWithin(quartiles, allowed, policy, priority){
     if (!quartiles) return null;
     const hits = Object.keys(quartiles).filter(c => allowed.has(c));
@@ -332,12 +376,12 @@
   const SELECT = "DOI,title,container-title,ISSN,issued,short-container-title";
 
   async function crossrefByDoi(doi){
-    const url = `${CROSSREF}/works/${encodeURIComponent(doi)}?mailto=${encodeURIComponent(CONFIG.mailto)}&select=${SELECT}`;
+    const url = `${CROSSREF}/works/${encodeURIComponent(doi)}?select=${SELECT}`;
     const r = await fetch(url); if(!r.ok) return null;
     return (await r.json()).message;
   }
   async function crossrefByTitle(title){
-    const url = `${CROSSREF}/works?query.bibliographic=${encodeURIComponent(title)}&rows=1&mailto=${encodeURIComponent(CONFIG.mailto)}&select=${SELECT}`;
+    const url = `${CROSSREF}/works?query.bibliographic=${encodeURIComponent(title)}&rows=1&select=${SELECT}`;
     const r = await fetch(url); if(!r.ok) return null;
     const items = (await r.json()).message.items; return items && items[0];
   }
@@ -397,7 +441,7 @@
     while (out.length < CONFIG.maxAuthorWorks){
       const url = `${CROSSREF}/works?filter=orcid:${encodeURIComponent(CONFIG.authorOrcid)}`
         + `&rows=${rows}&cursor=${encodeURIComponent(cursor)}`
-        + `&mailto=${encodeURIComponent(CONFIG.mailto)}&select=${SELECT}`;
+        + `&select=${SELECT}`;
       const r = await fetch(url); if(!r.ok) break;
       const msg = (await r.json()).message;
       const batch = (msg.items||[]).map(m => crossrefToRecord(m)).filter(Boolean);
@@ -427,6 +471,7 @@
      ================================================================= */
   function analyse(records, rankings){
     const rows = [];
+    const journalsSeen = new Map();   // sid -> { id, title, quartile }
     const domainStats = (CONFIG.domains || []).map(d => ({
       name: d.name, set: new Set(d.categories || []),
       counts: { Q1:0, Q2:0, Q3:0, Q4:0 }, total: 0
@@ -450,12 +495,22 @@
           const w = quartileWithin(jr.quartiles, ds.set, CONFIG.quartilePolicy, CONFIG.priorityOrder);
           if (w){ ds.counts[w.quartile]++; ds.total++; }
         }
+        // One entry per unique journal that has a Scopus Source ID, for the badges.
+        const sid = jr.sid || jr.sourceId;
+        if (sid && !journalsSeen.has(String(sid))){
+          journalsSeen.set(String(sid), {
+            id: String(sid),
+            title: jr.title || rec.journal || "",
+            quartile: dq ? dq.quartile : null
+          });
+        }
       }
     }
     const counts = { Q1:0, Q2:0, Q3:0, Q4:0, unranked:0 };
     for (const r of rows){ if (r.quartile) counts[r.quartile]++; else counts.unranked++; }
     const ranked = counts.Q1+counts.Q2+counts.Q3+counts.Q4;
-    return { rows, counts, ranked, total: rows.length, domainStats };
+    const journals = [...journalsSeen.values()].sort((a,b)=>a.title.localeCompare(b.title));
+    return { rows, counts, ranked, total: rows.length, domainStats, journals };
   }
 
   function render(data, rankings){
@@ -563,6 +618,32 @@
         dom.appendChild(row);
       }
       root.appendChild(dom);
+    }
+
+    // SCImago per-journal trend badges (one per unique matched journal).
+    if (CONFIG.showJournalBadges && data.journals && data.journals.length){
+      const sec = h(`<details class="liw-badges">
+        <summary>
+          <span class="liw-group-name">SCImago rank history by journal</span>
+          <span class="liw-group-count">${data.journals.length}</span>
+          <span class="liw-chev" aria-hidden="true">›</span>
+        </summary>
+      </details>`);
+      const grid = h(`<div class="liw-badge-grid"></div>`);
+      for (const j of data.journals){
+        const q = encodeURIComponent(j.id);
+        grid.appendChild(h(`<a class="liw-badge"
+          href="https://www.scimagojr.com/journalsearch.php?q=${q}&tip=sid&exact=no"
+          target="_blank" rel="noopener"
+          title="${esc(j.title)} on SCImago Journal & Country Rank">
+          <img loading="lazy" decoding="async" width="150"
+            src="https://www.scimagojr.com/journal_img.php?id=${q}"
+            alt="SCImago Journal & Country Rank — ${esc(j.title)}">
+          <span class="liw-badge-t">${esc(j.title)}</span>
+        </a>`));
+      }
+      sec.appendChild(grid);
+      root.appendChild(sec);
     }
 
     root.appendChild(h(`<div class="liw-foot">

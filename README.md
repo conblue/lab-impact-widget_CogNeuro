@@ -1,17 +1,17 @@
 # Lab Publication Impact Widget
 
-Summarises your lab's publications by journal-quality tier (top 25% / top 50%)
+Summarises lab's publications by journal-quality tier (top 25% / top 50%)
 using **domain-specific quartiles**, so an ageing journal is judged against
-ageing journals and can count under your neuro umbrella.
+ageing journals and can count under a specified judgement criteria. 
 
 Two files:
 
-- `journal-impact-widget.html` — the widget. Self-contained; drop it on your page.
+- `journal-impact-widget.html` — the widget that creates lab's impact
 - `build-rankings.mjs` — turns SCImago's public data into `rankings.json`.
 
 ## How it works
 
-1. **Papers in.** The widget reads your publications from your page's DOM, from
+1. **Papers in.** The widget reads  publications from lab page's DOM, from
    Crossref by ORCID, or from a DOI list.
 2. **Journal + ISSN.** Each paper is resolved through the free
    [Crossref API](https://www.crossref.org/) (no key, works from the browser) to
@@ -20,16 +20,17 @@ Two files:
    [SCImago Journal Rank](https://www.scimagojr.com/) (Scopus data). SCImago
    publishes a **separate quartile per subject category**, so `Q1 = top 25%` and
    `Q1+Q2 = top 50%` *within a field* come straight from the source.
-4. **Domain.** You list the SCImago categories that make up your field. When a
+4. **Domain.** You can list the SCImago categories that make up your field. When a
    journal spans several, the widget picks the strongest (or a priority order).
 
-### Why SCImago, not "Impact Factor"
+### Why use SCImago, and not "Impact Factor"
 
 The Clarivate Journal Impact Factor is paywalled with no free/legal API, so it
 can't drive a self-updating public widget. SCImago is free, reputable (Scopus-
 based), downloadable, and — unlike a single IF number — already thresholded
-*by domain*, which is exactly what you asked for. Please cite SCImago per their
-terms (non-commercial use, attribution).
+*by domain*.
+
+SCImago, (n.d.). SJR-SCImago Journal Country & Rank [Portal]. Retrieved (2026), from https://www.scimagojr.com
 
 ## Setup
 
@@ -58,11 +59,11 @@ Open `journal-impact-widget.html` and edit the `CONFIG` block:
 | `source` | `"dom"`, `"crossref-author"`, or `"doi-list"` (leave `"sample"` only for previewing) |
 | `domSelector` | for `"dom"`: the CSS selector of your publications container |
 | `authorOrcid` | for `"crossref-author"`: the lab's ORCID iD |
-| `mailto` | your contact, for Crossref's polite pool |
 | `rankingsUrl` | URL of your `rankings.json`, e.g. `"/rankings.json?v=2025"` |
 | `domainCategories` | the SCImago categories that count as your field |
 | `quartilePolicy` | `"best"` (recommended) or `"priority"` + `priorityOrder` |
 | `thresholds` | the tiers to report (defaults to top 25% and top 50%) |
+| `showJournalBadges` | `true` to show SCImago's per-journal SJR trend graph for each matched journal (collapsible, lazy-loaded from scimagojr.com) |
 
 ### 3. Embed
 
@@ -94,7 +95,7 @@ contents into your template, or load it in an iframe:
 
 Because SCImago computes quartiles **per subject category**, every paper is judged
 within its own field automatically — you do not need one bucket per domain. Just
-list *every* category your lab publishes in (neuroscience, neurology, behavioral
+list *every* category the lab publishes in (neuroscience, neurology, behavioral
 neuroscience, immunology, aging, pharmacology, psychology, physiology, …) in
 `domainCategories`. A behavioral paper is then scored against behavioral-neuroscience
 journals, an immunology paper against immunology journals, and so on. "Top 25%"
@@ -130,14 +131,20 @@ Leave `domains: []` for a single combined rollup.
   generic titles. DOIs (or ORCID) are far more reliable; prefer them.
 - **ISSN edge cases.** A paper may carry the print or electronic ISSN; the build
   script indexes both, so either resolves.
-- **Rate/politeness.** Crossref calls run at low concurrency with a `mailto`.
-  Resolved papers are cached in the browser (~30 days) so revisits are cheap.
+- **Rate.** Crossref calls run at low concurrency, and resolved papers are cached
+  in the browser (~30 days) so revisits are cheap.
 - **Quartile ≠ paper quality.** This ranks the *journal*, not the article, and
   quartiles shift year to year. Present it as journal-tier context, not a verdict
   on individual work.
 - **Attribution.** Keep the SCImago and Crossref credits the widget renders.
+- **Journal badges.** With `showJournalBadges: true` the widget embeds SCImago's
+  official per-journal trend image (`journal_img.php?id=<Sourceid>`), one per unique
+  matched journal, in a collapsed section. Images load lazily straight from
+  scimagojr.com and link back to the journal's SCImago page. The `Sourceid` comes
+  from the same SCImago table `build-rankings.mjs` already downloads, so no extra
+  data source is involved. Set the flag to `false` to keep everything self-hosted.
 
-## Put it on GitHub (version control, sharing, hosting, auto-update)
+## How to deploy and use
 
 ### 1. Create the repo and push
 
@@ -186,7 +193,7 @@ Point the widget at the co-hosted rankings file — in `CONFIG`, set:
 rankingsUrl: "rankings.json",   // relative → same origin as the widget, no CORS
 ```
 
-Embed it on your lab site with an iframe (keeps the widget and rankings.json on
+You can embed it on lab site with an iframe (keeps the widget and rankings.json on
 the same origin, so the fetch just works):
 
 ```html
@@ -195,7 +202,7 @@ the same origin, so the fetch just works):
 ```
 
 Prefer to serve from your own web server instead? Copy `journal-impact-widget.html`
-and `rankings.json` there together and skip Pages — same idea, same origin.
+and `rankings.json`
 
 ### 4. Keep rankings current automatically
 

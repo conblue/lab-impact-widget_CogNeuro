@@ -4,7 +4,8 @@
   ------------------------------------------------------------------
   Downloads the SCImago Journal Rank table and converts it into a compact
   rankings.json for the widget, keyed by ISSN, with each journal's per-category
-  quartiles preserved (that's what makes the widget domain-aware).
+  quartiles preserved (that's what makes the widget domain-aware) plus its
+  Scopus Source ID (`sid`), which drives the optional per-journal trend badge.
 
   SCImago publishes one table per year, semicolon-delimited, with European
   decimals and a "Categories" column that already embeds quartiles, e.g.
@@ -38,13 +39,45 @@ const DOMAIN_FILE = opt("--domain", "");
 // Default neuro/behavioral/aging umbrella. Override with --domain domain.json
 // (a JSON array of SCImago category names). Journals whose categories include
 // at least one of these are kept; a kept journal retains ALL its categories.
+// Names are Scopus ASJC subject categories, exactly as SCImago spells them.
+// The build script prints any configured name it did NOT find in the data, so a
+// typo surfaces on the next run. Trim this if search is too broad. 
 const DEFAULT_DOMAIN = [
-  "Neuroscience (miscellaneous)", "Neurology", "Neurology (clinical)",
-  "Cellular and Molecular Neuroscience", "Behavioral Neuroscience",
-  "Cognitive Neuroscience", "Developmental Neuroscience", "Sensory Systems",
-  "Endocrine and Autonomic Systems", "Biological Psychiatry",
-  "Psychiatry and Mental Health", "Aging", "Immunology",
-  "Immunology and Allergy", "Physiology", "Pharmacology (medical)"
+  // --- Neuroscience (all nine ASJC 2800 subcategories) ---
+  "Neuroscience (miscellaneous)", "Behavioral Neuroscience", "Biological Psychiatry",
+  "Cellular and Molecular Neuroscience", "Cognitive Neuroscience",
+  "Developmental Neuroscience", "Endocrine and Autonomic Systems", "Neurology",
+  "Sensory Systems",
+
+  // --- Psychology (all seven ASJC 3200 subcategories) ---
+  "Psychology (miscellaneous)", "Applied Psychology", "Clinical Psychology",
+  "Developmental and Educational Psychology", "Experimental and Cognitive Psychology",
+  "Neuropsychology and Physiological Psychology", "Social Psychology",
+
+  // --- Medicine: neuro-relevant subcategories ---
+  "Neurology (clinical)", "Psychiatry and Mental Health",
+  "Radiology, Nuclear Medicine and Imaging", "Rehabilitation",
+  "Physiology (medical)", "Pharmacology (medical)", "Geriatrics and Gerontology",
+  "Anesthesiology and Pain Medicine", "Endocrinology, Diabetes and Metabolism",
+  "Immunology and Allergy",
+
+  // --- Biochemistry, Genetics and Molecular Biology: cellular/systems basis ---
+  "Aging", "Biophysics", "Cell Biology", "Molecular Biology",
+  "Developmental Biology", "Endocrinology", "Physiology",
+
+  // --- Adjacent fields cog-neuro work lands in ---
+  "Immunology",                       // neuroinflammation
+  "Speech and Hearing",               // auditory / language
+  "Gerontology",                      // (Nursing) ageing
+  "Language and Linguistics", "Linguistics and Language", // psycholinguistics
+  "Pharmacology",                     // behavioral / neuropharmacology
+
+  // --- Computational / methods (BCI, modelling, neuroimaging pipelines) ---
+  "Artificial Intelligence", "Computer Science Applications",
+  "Human-Computer Interaction", "Signal Processing", "Biomedical Engineering",
+
+  // --- Broad-audience venues that carry high-impact neuro papers ---
+  "Multidisciplinary"
 ];
 const DOMAIN = DOMAIN_FILE ? JSON.parse(readFileSync(DOMAIN_FILE, "utf8")) : DEFAULT_DOMAIN;
 const DOMAIN_SET = new Set(DOMAIN);
@@ -131,6 +164,7 @@ async function main() {
   const cSjr = col(header, "SJR");
   const cCats = col(header, "Categories");
   const cBestQ = col(header, "SJR Best Quartile", "Best Quartile");
+  const cSid = col(header, "Sourceid", "Source Id", "Source ID");
   if (!cTitle || !cIssn || !cCats) throw new Error(`Unexpected CSV columns. Found: ${header.join(" | ")}`);
 
   const journals = {};
@@ -149,6 +183,7 @@ async function main() {
 
     const record = {
       title: r[cTitle] || "",
+      sid: cSid && r[cSid] ? String(r[cSid]).replace(/[^0-9]/g, "") || null : null,  // Scopus Source ID → SCImago badge
       sjr: cSjr && r[cSjr] ? Number(r[cSjr].replace(/\./g, "").replace(",", ".")) || null : null,
       bestQuartile: cBestQ ? (r[cBestQ] || null) : null,
       quartiles
