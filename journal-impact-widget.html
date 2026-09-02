@@ -33,15 +33,15 @@
     // "dom"             : scrape DOIs/titles from an element already on your page.
     // "crossref-author" : pull the author's works live from Crossref by ORCID. To look at specific lab member's impact.
     // "doi-list"        : an explicit list of DOIs in `doiList` below. Pool individually selected DOIs. 
-    source: "sample",
+    source: "crossref-author",
 
     // For source:"dom" — a CSS selector for the container holding your
     // publication list. The widget reads its text, pulls out any DOIs, and
-    // falls back to matching by the item's title text when no DOI is present.
+    // falls back to matching by  the item's title text when no DOI is present.
     domSelector: "#publications",
 
     // For source:"crossref-author" — the lab member's ORCID iD.
-    authorOrcid: "0000-0000-0000-0000",
+    authorOrcid: "0000-0002-7665-1171", // Prof. Carsten Finke (https://orcid.org/0000-0002-7665-1171)
     maxAuthorWorks: 400,
 
     // For source:"doi-list".
