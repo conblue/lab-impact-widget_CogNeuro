@@ -1,0 +1,596 @@
+<!--
+  Lab Publication Impact Widget
+  ------------------------------------------------------------------
+  Reads your lab's publications, resolves each to a journal ISSN via Crossref,
+  looks the ISSN up in a SCImago-derived rankings file, and summarises the
+  papers by quartile threshold (top 25% = Q1, top 50% = Q1+Q2) within your
+  chosen research domain.
+
+  This single file is both a live demo (open it in a browser as-is) and the
+  deployable widget. To go live, edit the CONFIG block below. Everything is
+  scoped under #lab-impact-widget so it won't collide with your site's styles.
+
+  Data sources (all free, no API key):
+    - Rankings : SCImago Journal Rank quartiles, built into rankings.json by
+                 build-rankings.mjs (see README). Cite SCImago per their terms.
+    - Papers   : your own page's DOM, or Crossref-by-ORCID, or a DOI list.
+    - Matching : Crossref REST API (CORS-enabled, browser-callable).
+-->
+<div id="lab-impact-widget" aria-live="polite">
+  <noscript>This publication-impact summary requires JavaScript.</noscript>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* =================================================================
+     CONFIG  — edit this block, then deploy the file.
+     ================================================================= */
+  const CONFIG = {
+    // ---- Where do the publications come from? -----------------------------
+    // "sample"          : built-in demo data (works offline; for previewing).
+    // "dom"             : scrape DOIs/titles from an element already on your page.
+    // "crossref-author" : pull the author's works live from Crossref by ORCID.
+    // "doi-list"        : an explicit list of DOIs in `doiList` below.
+    source: "sample",
+
+    // For source:"dom" — a CSS selector for the container holding your
+    // publication list. The widget reads its text, pulls out any DOIs, and
+    // falls back to matching by the item's title text when no DOI is present.
+    domSelector: "#publications",
+
+    // For source:"crossref-author" — the lab head's (or lab's) ORCID iD.
+    authorOrcid: "0000-0000-0000-0000",
+    maxAuthorWorks: 400,
+
+    // For source:"doi-list".
+    doiList: [],
+
+    // Polite-pool contact for Crossref (they may email you about heavy use).
+    mailto: "your-lab@university.edu",
+
+    // ---- Rankings file ----------------------------------------------------
+    // URL of rankings.json produced by build-rankings.mjs, hosted on your site
+    // (same origin avoids CORS). Leave "" to use the small built-in SAMPLE set.
+    // Add a version/date so browsers pick up yearly rebuilds: "/rankings.json?v=2025"
+    rankingsUrl: "",
+
+    // ---- Your research domain --------------------------------------------
+    // SCImago subject categories that count as "your field". A journal carries
+    // a separate quartile for EACH category it belongs to, so listing "Aging"
+    // here is what makes an ageing journal count under your neuro umbrella.
+    // (Names must match SCImago's spelling — see the list printed by the build
+    // script, or scimagojr.com category filter.)
+    domainCategories: [
+      "Neuroscience (miscellaneous)",
+      "Neurology",
+      "Neurology (clinical)",
+      "Cellular and Molecular Neuroscience",
+      "Behavioral Neuroscience",
+      "Cognitive Neuroscience",
+      "Developmental Neuroscience",
+      "Sensory Systems",
+      "Endocrine and Autonomic Systems",
+      "Biological Psychiatry",
+      "Psychiatry and Mental Health",
+      "Aging",
+      "Immunology",
+      "Immunology and Allergy",
+      "Physiology"
+    ],
+
+    // When a journal sits in several of your domain categories, which quartile
+    // represents it?
+    //   "best"     : the strongest quartile among your categories (recommended).
+    //   "priority" : the quartile of the first category in `priorityOrder`
+    //                that the journal belongs to.
+    quartilePolicy: "best",
+    priorityOrder: ["Neurology (clinical)", "Neuroscience (miscellaneous)", "Aging"],
+
+    // If a journal has NO category in your domain, fall back to its overall
+    // SCImago best-quartile (true), or mark it "outside domain" (false).
+    fallbackToBestQuartile: true,
+
+    // ---- Optional: break the summary out by research domain ---------------
+    // Your lab spans several fields. The combined view above already judges
+    // every paper within its own field's quartile. If you ALSO want the split
+    // by domain, define named domains here; each is a set of SCImago categories,
+    // and every domain is scored against ITS OWN categories (so the same
+    // neuroinflammation journal can be Q1 as immunology and Q3 as neurology).
+    // A paper counts in every domain its journal matches, so per-domain totals
+    // can exceed the paper count. Leave [] for a single combined rollup only.
+    // (You don't need to also list these in domainCategories — they're merged.)
+    domains: [
+      { name: "Neuroscience & neurology", categories: [
+        "Neuroscience (miscellaneous)", "Neurology", "Neurology (clinical)",
+        "Cellular and Molecular Neuroscience", "Cognitive Neuroscience",
+        "Developmental Neuroscience", "Sensory Systems"
+      ] },
+      { name: "Behavioral science", categories: [
+        "Behavioral Neuroscience", "Experimental and Cognitive Psychology"
+      ] },
+      { name: "Neuroinflammation & immunology", categories: [
+        "Immunology", "Immunology and Allergy"
+      ] },
+      { name: "Aging", categories: ["Aging", "Geriatrics and Gerontology"] }
+    ],
+
+    // ---- Thresholds (cumulative) -----------------------------------------
+    // Quartiles that make up each tier. Q1 = top 25%, Q1+Q2 = top 50%, etc.
+    thresholds: [
+      { label: "Top 25%", quartiles: ["Q1"] },
+      { label: "Top 50%", quartiles: ["Q1", "Q2"] }
+    ],
+
+    // ---- Behaviour --------------------------------------------------------
+    cacheHours: 24 * 30,     // how long to cache a paper's resolved journal
+    concurrency: 4,          // parallel Crossref requests (be polite)
+    showUnranked: true       // list papers we couldn't place
+  };
+
+  /* =================================================================
+     SAMPLE DATA — illustrative only. In production the widget resolves
+     papers live via Crossref and reads real quartiles from rankings.json.
+     Quartiles below are plausible placeholders for the demo, NOT authoritative.
+     ================================================================= */
+  const SAMPLE_PUBLICATIONS = [
+    { title: "Synaptic tagging in memory consolidation", journal: "Nature Neuroscience",              issn: "10976256", year: 2024, doi: "10.1038/s41593-024-00001-0" },
+    { title: "Microglial priming after injury",          journal: "Neuron",                            issn: "08966273", year: 2023, doi: "10.1016/j.neuron.2023.00001" },
+    { title: "Cortical circuits of decision-making",     journal: "Nature Reviews Neuroscience",       issn: "1471003X", year: 2024, doi: "10.1038/s41583-024-00002-1" },
+    { title: "Tau propagation across networks",          journal: "Brain",                             issn: "14602156", year: 2022, doi: "10.1093/brain/awac001" },
+    { title: "Inflammatory markers in ageing brains",    journal: "Aging Cell",                        issn: "14749726", year: 2023, doi: "10.1111/acel.13001" },
+    { title: "Reward learning and dopamine timing",      journal: "Journal of Neuroscience",           issn: "15292401", year: 2021, doi: "10.1523/jneurosci.0001-21.2021" },
+    { title: "Behavioral flexibility in rodents",        journal: "Behavioural Brain Research",        issn: "18727549", year: 2022, doi: "10.1016/j.bbr.2022.00001" },
+    { title: "Neuroinflammation and sleep loss",         journal: "Journal of Neuroinflammation",      issn: "17422094", year: 2024, doi: "10.1186/s12974-024-00001-2" },
+    { title: "A case series in movement disorders",      journal: "Movement Disorders",                issn: "15318257", year: 2020, doi: "10.1002/mds.28001" },
+    { title: "Exploratory pilot in a small cohort",      journal: "Frontiers in Aging Neuroscience",   issn: "16634365", year: 2023, doi: "10.3389/fnagi.2023.00001" }
+  ];
+
+  // ISSN (hyphen-stripped) -> { title, quartiles: { category: "Q1" } }.
+  const SAMPLE_RANKINGS = {
+    meta: { note: "SAMPLE DATA — replace with rankings.json from build-rankings.mjs", year: "demo" },
+    journals: {
+      "10976256": { title: "Nature Neuroscience",            quartiles: { "Neuroscience (miscellaneous)": "Q1" } },
+      "08966273": { title: "Neuron",                         quartiles: { "Neuroscience (miscellaneous)": "Q1", "Cellular and Molecular Neuroscience": "Q1" } },
+      "1471003X": { title: "Nature Reviews Neuroscience",    quartiles: { "Neuroscience (miscellaneous)": "Q1" } },
+      "14602156": { title: "Brain",                          quartiles: { "Neurology (clinical)": "Q1", "Neurology": "Q1" } },
+      "14749726": { title: "Aging Cell",                     quartiles: { "Aging": "Q1", "Cellular and Molecular Neuroscience": "Q1", "Immunology": "Q1" } },
+      "15292401": { title: "Journal of Neuroscience",        quartiles: { "Neuroscience (miscellaneous)": "Q1" } },
+      "18727549": { title: "Behavioural Brain Research",     quartiles: { "Behavioral Neuroscience": "Q2" } },
+      "17422094": { title: "Journal of Neuroinflammation",   quartiles: { "Neurology (clinical)": "Q1", "Immunology": "Q1", "Cellular and Molecular Neuroscience": "Q1" } },
+      "15318257": { title: "Movement Disorders",             quartiles: { "Neurology (clinical)": "Q1" } },
+      "16634365": { title: "Frontiers in Aging Neuroscience", quartiles: { "Aging": "Q2", "Neuroscience (miscellaneous)": "Q3" } }
+    }
+  };
+
+  /* =================================================================
+     STYLES  (scoped under #lab-impact-widget)
+     ================================================================= */
+  const CSS = `
+  #lab-impact-widget{
+    --liw-ink:#0E1A2B; --liw-soft:#5A6B7E; --liw-faint:#8A98A6;
+    --liw-surface:#ffffff; --liw-bg:#F4F6F8; --liw-line:#E3E8ED;
+    --liw-q1:#0F766E; --liw-q2:#2C9C93; --liw-q3:#74BDB4; --liw-q4:#B7D8D2;
+    --liw-unranked:#D5DBE1; --liw-focus:#2563EB;
+    --liw-mono: ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --liw-sans: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--liw-ink); font-family:var(--liw-sans);
+    max-width:760px; line-height:1.5; -webkit-font-smoothing:antialiased;
+  }
+  #lab-impact-widget *{box-sizing:border-box;}
+  #lab-impact-widget .liw-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:4px;}
+  #lab-impact-widget h2.liw-title{font-size:1.05rem;font-weight:650;letter-spacing:-0.01em;margin:0;}
+  #lab-impact-widget .liw-meta{font-family:var(--liw-mono);font-size:0.72rem;color:var(--liw-faint);letter-spacing:0.02em;}
+  #lab-impact-widget .liw-demo-flag{display:inline-block;font-family:var(--liw-mono);font-size:0.66rem;letter-spacing:0.06em;text-transform:uppercase;color:#8a5a00;background:#FBF0DA;border:1px solid #F0D9A8;border-radius:4px;padding:2px 7px;margin:8px 0 0;}
+
+  /* Hero spectrum bar — the signature element */
+  #lab-impact-widget .liw-spectrum{display:flex;height:56px;border-radius:8px;overflow:hidden;border:1px solid var(--liw-line);margin:16px 0 10px;background:var(--liw-bg);}
+  #lab-impact-widget .liw-seg{display:flex;flex-direction:column;justify-content:center;align-items:center;color:#fff;min-width:0;overflow:hidden;transition:flex-grow .6s cubic-bezier(.2,.7,.2,1);}
+  #lab-impact-widget .liw-seg .liw-seg-n{font-family:var(--liw-mono);font-size:0.98rem;font-weight:600;line-height:1;}
+  #lab-impact-widget .liw-seg .liw-seg-l{font-family:var(--liw-mono);font-size:0.62rem;letter-spacing:0.04em;opacity:.9;margin-top:3px;}
+  #lab-impact-widget .liw-seg.q4,#lab-impact-widget .liw-seg.un{color:var(--liw-ink);}
+
+  /* Threshold stat readouts */
+  #lab-impact-widget .liw-stats{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 4px;}
+  #lab-impact-widget .liw-stat{flex:1 1 150px;border:1px solid var(--liw-line);border-radius:8px;padding:10px 12px;background:var(--liw-surface);}
+  #lab-impact-widget .liw-stat .liw-stat-l{font-size:0.72rem;color:var(--liw-soft);}
+  #lab-impact-widget .liw-stat .liw-stat-v{font-family:var(--liw-mono);font-size:1.35rem;font-weight:650;letter-spacing:-0.01em;margin-top:2px;}
+  #lab-impact-widget .liw-stat .liw-stat-s{font-family:var(--liw-mono);font-size:0.72rem;color:var(--liw-faint);}
+
+  /* Tier groups */
+  #lab-impact-widget .liw-groups{margin-top:14px;border-top:1px solid var(--liw-line);}
+  #lab-impact-widget details.liw-group{border-bottom:1px solid var(--liw-line);}
+  #lab-impact-widget details.liw-group>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;padding:11px 4px;user-select:none;}
+  #lab-impact-widget details.liw-group>summary::-webkit-details-marker{display:none;}
+  #lab-impact-widget .liw-dot{width:10px;height:10px;border-radius:2px;flex:0 0 auto;}
+  #lab-impact-widget .liw-group-name{font-weight:600;font-size:0.9rem;}
+  #lab-impact-widget .liw-group-count{font-family:var(--liw-mono);font-size:0.8rem;color:var(--liw-soft);margin-left:auto;}
+  #lab-impact-widget .liw-chev{transition:transform .2s;color:var(--liw-faint);}
+  #lab-impact-widget details[open]>summary .liw-chev{transform:rotate(90deg);}
+  #lab-impact-widget ul.liw-papers{list-style:none;margin:0 0 8px;padding:0 4px 4px 24px;}
+  #lab-impact-widget li.liw-paper{padding:7px 0;border-top:1px dotted var(--liw-line);font-size:0.85rem;}
+  #lab-impact-widget li.liw-paper:first-child{border-top:none;}
+  #lab-impact-widget .liw-paper-t{color:var(--liw-ink);}
+  #lab-impact-widget .liw-paper-j{color:var(--liw-soft);font-size:0.8rem;}
+  #lab-impact-widget .liw-tag{font-family:var(--liw-mono);font-size:0.68rem;padding:1px 6px;border-radius:4px;border:1px solid var(--liw-line);color:var(--liw-soft);white-space:nowrap;}
+
+  /* Per-domain breakdown */
+  #lab-impact-widget .liw-domains{margin-top:18px;}
+  #lab-impact-widget .liw-domains h3{font-size:0.85rem;font-weight:650;margin:0 0 2px;}
+  #lab-impact-widget .liw-domains .liw-dhint{font-size:0.72rem;color:var(--liw-faint);margin:0 0 10px;}
+  #lab-impact-widget .liw-drow{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px dotted var(--liw-line);}
+  #lab-impact-widget .liw-dname{font-size:0.85rem;flex:0 0 160px;}
+  #lab-impact-widget .liw-dbar{flex:1 1 auto;display:flex;height:18px;border-radius:4px;overflow:hidden;background:var(--liw-bg);border:1px solid var(--liw-line);min-width:70px;}
+  #lab-impact-widget .liw-dbar span{display:block;}
+  #lab-impact-widget .liw-dnums{font-family:var(--liw-mono);font-size:0.72rem;color:var(--liw-soft);white-space:nowrap;flex:0 0 auto;text-align:right;min-width:150px;}
+  #lab-impact-widget .liw-dnums b{color:var(--liw-ink);font-weight:600;}
+  @media (max-width:520px){
+    #lab-impact-widget .liw-drow{flex-wrap:wrap;}
+    #lab-impact-widget .liw-dname{flex-basis:100%;}
+    #lab-impact-widget .liw-dnums{min-width:0;}
+  }
+
+  #lab-impact-widget .liw-loading,#lab-impact-widget .liw-error{padding:18px 4px;color:var(--liw-soft);font-size:0.9rem;}
+  #lab-impact-widget .liw-error{color:#8a2020;}
+  #lab-impact-widget .liw-foot{margin-top:12px;font-size:0.72rem;color:var(--liw-faint);}
+  #lab-impact-widget a.liw-src{color:var(--liw-soft);text-decoration:none;border-bottom:1px solid var(--liw-line);}
+  #lab-impact-widget a.liw-src:hover{color:var(--liw-ink);}
+  #lab-impact-widget summary:focus-visible,#lab-impact-widget a:focus-visible{outline:2px solid var(--liw-focus);outline-offset:2px;border-radius:3px;}
+  @media (prefers-reduced-motion: reduce){#lab-impact-widget .liw-seg{transition:none;}}
+  `;
+
+  const QCOLOR = { Q1: "var(--liw-q1)", Q2: "var(--liw-q2)", Q3: "var(--liw-q3)", Q4: "var(--liw-q4)" };
+  const QCLASS = { Q1: "q1", Q2: "q2", Q3: "q3", Q4: "q4" };
+
+  /* =================================================================
+     Small utilities
+     ================================================================= */
+  const root = document.getElementById("lab-impact-widget");
+  function h(html){ const d=document.createElement("div"); d.innerHTML=html.trim(); return d.firstElementChild; }
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+  function normIssn(s){ return String(s||"").toUpperCase().replace(/[^0-9X]/g,""); }
+  function qNum(q){ return q ? parseInt(q.slice(1),10) : 99; }
+
+  // localStorage cache that degrades gracefully (e.g. inside sandboxes).
+  const store = (function(){
+    let ok=true; try{ const k="__liw"; localStorage.setItem(k,"1"); localStorage.removeItem(k);}catch(e){ ok=false; }
+    const mem={};
+    return {
+      get(key){ try{ return ok?JSON.parse(localStorage.getItem(key)):mem[key]||null; }catch(e){ return null; } },
+      set(key,val){ try{ ok?localStorage.setItem(key,JSON.stringify(val)):(mem[key]=val); }catch(e){ mem[key]=val; } }
+    };
+  })();
+
+  async function mapPool(items, worker, size){
+    const out=new Array(items.length); let i=0;
+    async function run(){ while(i<items.length){ const idx=i++; try{ out[idx]=await worker(items[idx],idx); }catch(e){ out[idx]=null; } } }
+    await Promise.all(Array.from({length:Math.min(size,items.length)},run));
+    return out;
+  }
+
+  /* =================================================================
+     Rankings
+     ================================================================= */
+  async function loadRankings(){
+    if (!CONFIG.rankingsUrl) return SAMPLE_RANKINGS;
+    const res = await fetch(CONFIG.rankingsUrl, { headers:{ Accept:"application/json" } });
+    if (!res.ok) throw new Error("Could not load rankings.json ("+res.status+")");
+    return res.json();
+  }
+
+  // Union of every category the lab cares about (flat list + all domains).
+  const DOMAIN_UNION = (function(){
+    const s = new Set(CONFIG.domainCategories || []);
+    (CONFIG.domains || []).forEach(d => (d.categories || []).forEach(c => s.add(c)));
+    return s;
+  })();
+
+  // Best (or priority) quartile among the categories in `allowed`. This is the
+  // core primitive: give it the union set for the combined view, or a single
+  // domain's set to score that journal *within that domain*.
+  function quartileWithin(quartiles, allowed, policy, priority){
+    if (!quartiles) return null;
+    const hits = Object.keys(quartiles).filter(c => allowed.has(c));
+    if (!hits.length) return null;
+    if (policy === "priority" && priority){
+      for (const cat of priority){ if (quartiles[cat] && allowed.has(cat)) return { quartile: quartiles[cat], category: cat }; }
+    }
+    let best=null;
+    for (const cat of hits){
+      if (!best || qNum(quartiles[cat]) < qNum(best.quartile)) best = { quartile: quartiles[cat], category: cat };
+    }
+    return best;
+  }
+
+  // Combined-view quartile: score within the union of all the lab's categories,
+  // falling back to the journal's overall best quartile if nothing matches.
+  function domainQuartile(quartiles){
+    if (!quartiles) return null;
+    const within = quartileWithin(quartiles, DOMAIN_UNION, CONFIG.quartilePolicy, CONFIG.priorityOrder);
+    if (within) return { quartile: within.quartile, category: within.category, inDomain: true };
+    if (CONFIG.fallbackToBestQuartile){
+      const all = new Set(Object.keys(quartiles));
+      const best = quartileWithin(quartiles, all, "best", null);
+      if (best) return { quartile: best.quartile, category: best.category, inDomain: false };
+    }
+    return null;
+  }
+
+  function lookupJournal(rankings, issnCandidates){
+    for (const raw of issnCandidates){
+      const key = normIssn(raw);
+      if (key && rankings.journals[key]) return rankings.journals[key];
+    }
+    return null;
+  }
+
+  /* =================================================================
+     Publication acquisition
+     ================================================================= */
+  const CROSSREF = "https://api.crossref.org";
+  const SELECT = "DOI,title,container-title,ISSN,issued,short-container-title";
+
+  async function crossrefByDoi(doi){
+    const url = `${CROSSREF}/works/${encodeURIComponent(doi)}?mailto=${encodeURIComponent(CONFIG.mailto)}&select=${SELECT}`;
+    const r = await fetch(url); if(!r.ok) return null;
+    return (await r.json()).message;
+  }
+  async function crossrefByTitle(title){
+    const url = `${CROSSREF}/works?query.bibliographic=${encodeURIComponent(title)}&rows=1&mailto=${encodeURIComponent(CONFIG.mailto)}&select=${SELECT}`;
+    const r = await fetch(url); if(!r.ok) return null;
+    const items = (await r.json()).message.items; return items && items[0];
+  }
+  function crossrefToRecord(msg, fallbackTitle){
+    if(!msg) return null;
+    return {
+      title: (msg.title && msg.title[0]) || fallbackTitle || "(untitled)",
+      journal: (msg["container-title"] && msg["container-title"][0]) || (msg["short-container-title"] && msg["short-container-title"][0]) || "",
+      issns: msg.ISSN || [],
+      year: msg.issued && msg.issued["date-parts"] && msg.issued["date-parts"][0] ? msg.issued["date-parts"][0][0] : null,
+      doi: msg.DOI || null
+    };
+  }
+
+  async function resolveDoi(doi){
+    const ck = "liw:doi:"+doi.toLowerCase();
+    const cached = store.get(ck);
+    if (cached && cached._t && (Date.now()-cached._t) < CONFIG.cacheHours*3600e3) return cached.rec;
+    const rec = crossrefToRecord(await crossrefByDoi(doi));
+    if (rec) store.set(ck, { _t: Date.now(), rec });
+    return rec;
+  }
+  async function resolveTitle(title){
+    const ck = "liw:ti:"+title.toLowerCase().slice(0,120);
+    const cached = store.get(ck);
+    if (cached && cached._t && (Date.now()-cached._t) < CONFIG.cacheHours*3600e3) return cached.rec;
+    const rec = crossrefToRecord(await crossrefByTitle(title), title);
+    if (rec) store.set(ck, { _t: Date.now(), rec });
+    return rec;
+  }
+
+  const DOI_RE = /10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i;
+
+  function scrapeDom(){
+    const el = document.querySelector(CONFIG.domSelector);
+    if(!el) throw new Error(`No element matches domSelector "${CONFIG.domSelector}".`);
+    // Prefer explicit list items / paragraphs; fall back to lines of text.
+    let nodes = Array.from(el.querySelectorAll("li,p,article,div.publication,.csl-entry"));
+    if(!nodes.length) nodes = [el];
+    const seen = new Set(), items = [];
+    for (const n of nodes){
+      const text = (n.textContent||"").replace(/\s+/g," ").trim();
+      if(!text) continue;
+      const link = n.querySelector && n.querySelector('a[href*="doi.org/"],a[href*="doi/"]');
+      let doi = null;
+      if (link){ const m = link.href.match(DOI_RE); if(m) doi = m[0]; }
+      if (!doi){ const m = text.match(DOI_RE); if(m) doi = m[0]; }
+      const key = doi ? doi.toLowerCase() : text.slice(0,140).toLowerCase();
+      if (seen.has(key)) continue; seen.add(key);
+      items.push(doi ? { doi } : { title: text.slice(0,300) });
+    }
+    return items;
+  }
+
+  async function crossrefAuthorWorks(){
+    const rows = 200, out = []; let cursor = "*";
+    while (out.length < CONFIG.maxAuthorWorks){
+      const url = `${CROSSREF}/works?filter=orcid:${encodeURIComponent(CONFIG.authorOrcid)}`
+        + `&rows=${rows}&cursor=${encodeURIComponent(cursor)}`
+        + `&mailto=${encodeURIComponent(CONFIG.mailto)}&select=${SELECT}`;
+      const r = await fetch(url); if(!r.ok) break;
+      const msg = (await r.json()).message;
+      const batch = (msg.items||[]).map(m => crossrefToRecord(m)).filter(Boolean);
+      out.push(...batch);
+      if (!msg["next-cursor"] || batch.length < rows) break;
+      cursor = msg["next-cursor"];
+    }
+    return out.slice(0, CONFIG.maxAuthorWorks);
+  }
+
+  // Return an array of resolved records: {title, journal, issns[], year, doi}.
+  async function getPublications(){
+    if (CONFIG.source === "sample"){
+      return SAMPLE_PUBLICATIONS.map(p => ({ title:p.title, journal:p.journal, issns:[p.issn], year:p.year, doi:p.doi }));
+    }
+    if (CONFIG.source === "crossref-author"){
+      return crossrefAuthorWorks();
+    }
+    let refs = [];
+    if (CONFIG.source === "dom") refs = scrapeDom();
+    else if (CONFIG.source === "doi-list") refs = CONFIG.doiList.map(d => ({ doi:d }));
+    return mapPool(refs, async ref => ref.doi ? resolveDoi(ref.doi) : resolveTitle(ref.title), CONFIG.concurrency);
+  }
+
+  /* =================================================================
+     Aggregate + render
+     ================================================================= */
+  function analyse(records, rankings){
+    const rows = [];
+    const domainStats = (CONFIG.domains || []).map(d => ({
+      name: d.name, set: new Set(d.categories || []),
+      counts: { Q1:0, Q2:0, Q3:0, Q4:0 }, total: 0
+    }));
+
+    for (const rec of records){
+      if (!rec) continue;
+      const jr = lookupJournal(rankings, rec.issns);
+      const dq = jr ? domainQuartile(jr.quartiles) : null;
+      rows.push({
+        title: rec.title, journal: rec.journal || (jr && jr.title) || "",
+        year: rec.year, doi: rec.doi,
+        quartile: dq ? dq.quartile : null,
+        category: dq ? dq.category : null,
+        inDomain: dq ? dq.inDomain : false,
+        matched: !!jr
+      });
+      // Per-domain: score this journal within each domain's own categories.
+      if (jr){
+        for (const ds of domainStats){
+          const w = quartileWithin(jr.quartiles, ds.set, CONFIG.quartilePolicy, CONFIG.priorityOrder);
+          if (w){ ds.counts[w.quartile]++; ds.total++; }
+        }
+      }
+    }
+    const counts = { Q1:0, Q2:0, Q3:0, Q4:0, unranked:0 };
+    for (const r of rows){ if (r.quartile) counts[r.quartile]++; else counts.unranked++; }
+    const ranked = counts.Q1+counts.Q2+counts.Q3+counts.Q4;
+    return { rows, counts, ranked, total: rows.length, domainStats };
+  }
+
+  function render(data, rankings){
+    root.innerHTML = "";
+    root.appendChild(h(`<style>${CSS}</style>`));
+
+    const yr = rankings.meta && rankings.meta.year ? rankings.meta.year : "";
+    const head = h(`<div class="liw-head">
+      <h2 class="liw-title">Publication impact by journal quartile</h2>
+      <span class="liw-meta">${esc(data.total)} papers · SCImago ${esc(yr)}</span>
+    </div>`);
+    root.appendChild(head);
+
+    if (CONFIG.source === "sample" || !CONFIG.rankingsUrl){
+      root.appendChild(h(`<div class="liw-demo-flag">Demo data · edit CONFIG to go live</div>`));
+    }
+
+    // Hero spectrum
+    const spectrum = h(`<div class="liw-spectrum" role="img" aria-label="Distribution of papers across journal quartiles"></div>`);
+    const order = [["Q1",data.counts.Q1],["Q2",data.counts.Q2],["Q3",data.counts.Q3],["Q4",data.counts.Q4]];
+    if (CONFIG.showUnranked) order.push(["un",data.counts.unranked]);
+    for (const [k,n] of order){
+      if (n<=0) continue;
+      const isUn = k==="un";
+      const bg = isUn ? "var(--liw-unranked)" : QCOLOR[k];
+      const seg = h(`<div class="liw-seg ${isUn?"un":QCLASS[k]}" style="flex-grow:0;background:${bg}">
+        <span class="liw-seg-n">${n}</span>
+        <span class="liw-seg-l">${isUn?"n/a":k}</span>
+      </div>`);
+      spectrum.appendChild(seg);
+      requestAnimationFrame(()=>{ seg.style.flexGrow = String(n); });
+    }
+    root.appendChild(spectrum);
+
+    // Threshold readouts
+    const stats = h(`<div class="liw-stats"></div>`);
+    for (const t of CONFIG.thresholds){
+      const n = t.quartiles.reduce((s,q)=>s+(data.counts[q]||0),0);
+      const pct = data.ranked ? Math.round(100*n/data.ranked) : 0;
+      stats.appendChild(h(`<div class="liw-stat">
+        <div class="liw-stat-l">${esc(t.label)} <span style="color:var(--liw-faint)">(${t.quartiles.join("+")})</span></div>
+        <div class="liw-stat-v">${n}</div>
+        <div class="liw-stat-s">${pct}% of ${data.ranked} ranked</div>
+      </div>`));
+    }
+    root.appendChild(stats);
+
+    // Tier groups
+    const groups = h(`<div class="liw-groups"></div>`);
+    const tierDefs = [
+      { key:"Q1", name:"Q1 — top 25%", color:"var(--liw-q1)" },
+      { key:"Q2", name:"Q2 — top 50%", color:"var(--liw-q2)" },
+      { key:"Q3", name:"Q3 — top 75%", color:"var(--liw-q3)" },
+      { key:"Q4", name:"Q4 — bottom 25%", color:"var(--liw-q4)" }
+    ];
+    if (CONFIG.showUnranked) tierDefs.push({ key:"unranked", name:"Not ranked in your domain", color:"var(--liw-unranked)" });
+
+    for (const tier of tierDefs){
+      const papers = data.rows.filter(r => (tier.key==="unranked") ? !r.quartile : r.quartile===tier.key);
+      if (!papers.length) continue;
+      const det = h(`<details class="liw-group"${tier.key==="Q1"?" open":""}>
+        <summary>
+          <span class="liw-dot" style="background:${tier.color}"></span>
+          <span class="liw-group-name">${esc(tier.name)}</span>
+          <span class="liw-group-count">${papers.length}</span>
+          <span class="liw-chev" aria-hidden="true">›</span>
+        </summary>
+      </details>`);
+      const ul = h(`<ul class="liw-papers"></ul>`);
+      for (const p of papers){
+        const tag = p.category
+          ? `<span class="liw-tag">${esc(p.category)}${p.inDomain?"":" · overall"}</span>`
+          : (p.matched ? `<span class="liw-tag">outside domain</span>` : `<span class="liw-tag">no ISSN match</span>`);
+        ul.appendChild(h(`<li class="liw-paper">
+          <div class="liw-paper-t">${esc(p.title)}</div>
+          <div class="liw-paper-j">${esc(p.journal||"—")}${p.year?` · ${esc(p.year)}`:""} ${tag}</div>
+        </li>`));
+      }
+      det.appendChild(ul);
+      groups.appendChild(det);
+    }
+    root.appendChild(groups);
+
+    // Per-domain breakdown (only if domains are configured and any matched)
+    const activeDomains = (data.domainStats || []).filter(d => d.total > 0);
+    if (activeDomains.length){
+      const dom = h(`<div class="liw-domains">
+        <h3>By research domain</h3>
+        <p class="liw-dhint">Each domain scored against its own field. A paper spanning fields counts in each.</p>
+      </div>`);
+      for (const ds of activeDomains){
+        const t25 = ds.counts.Q1;
+        const t50 = ds.counts.Q1 + ds.counts.Q2;
+        const p25 = Math.round(100*t25/ds.total);
+        const p50 = Math.round(100*t50/ds.total);
+        const bar = h(`<div class="liw-dbar" role="img" aria-label="${esc(ds.name)} quartile distribution"></div>`);
+        for (const q of ["Q1","Q2","Q3","Q4"]){
+          const n = ds.counts[q];
+          if (n>0) bar.appendChild(h(`<span style="flex:${n} 0 0;background:${QCOLOR[q]}" title="${q}: ${n}"></span>`));
+        }
+        const row = h(`<div class="liw-drow"></div>`);
+        row.appendChild(h(`<div class="liw-dname">${esc(ds.name)}</div>`));
+        row.appendChild(bar);
+        row.appendChild(h(`<div class="liw-dnums">n=${ds.total} · <b>${p25}%</b> top&nbsp;25 · <b>${p50}%</b> top&nbsp;50</div>`));
+        dom.appendChild(row);
+      }
+      root.appendChild(dom);
+    }
+
+    root.appendChild(h(`<div class="liw-foot">
+      Quartiles within your research domain, from
+      <a class="liw-src" href="https://www.scimagojr.com/" target="_blank" rel="noopener">SCImago Journal Rank</a>
+      (Scopus data). Journal matching via
+      <a class="liw-src" href="https://www.crossref.org/" target="_blank" rel="noopener">Crossref</a>.
+    </div>`));
+  }
+
+  function showLoading(){ root.innerHTML=""; root.appendChild(h(`<style>${CSS}</style>`)); root.appendChild(h(`<div class="liw-loading">Loading publications…</div>`)); }
+  function showError(msg){ root.appendChild(h(`<div class="liw-error">Couldn't build the impact summary: ${esc(msg)}</div>`)); }
+
+  async function init(){
+    showLoading();
+    try{
+      const [records, rankings] = await Promise.all([ getPublications(), loadRankings() ]);
+      const usable = (records||[]).filter(Boolean);
+      if (!usable.length){ root.innerHTML=""; root.appendChild(h(`<style>${CSS}</style>`)); showError("No publications found. Check the source setting in CONFIG."); return; }
+      render(analyse(usable, rankings), rankings);
+    }catch(err){
+      root.innerHTML=""; root.appendChild(h(`<style>${CSS}</style>`)); showError(err.message||String(err));
+    }
+  }
+
+  if (document.readyState==="loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+
+  window.LabImpactWidget = { reload: init, config: CONFIG };
+})();
+</script>
