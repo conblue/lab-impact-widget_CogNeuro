@@ -18,6 +18,12 @@
     node build-rankings.mjs --year 2024     # a specific SCImago year
     node build-rankings.mjs --all           # keep every journal (bigger file)
     node build-rankings.mjs --out rankings.json --domain domain.json
+    node build-rankings.mjs --file scimago-source.csv   # parse a local CSV, skip the download
+
+  SCImago is behind Cloudflare and blocks obvious bots and datacenter IPs (so the
+  direct download often 403s on CI). When that happens, open
+  scimagojr.com › Journal Rankings › Download data in a browser, save the CSV,
+  and pass it with --file.
 
   Run it yearly (e.g. a cron job) and redeploy rankings.json so the widget
   tracks ranking changes. Data is SCImago's; cite them per their terms:
@@ -35,6 +41,7 @@ const YEAR = opt("--year", "");                 // "" = SCImago's default (lates
 const OUT = opt("--out", "rankings.json");
 const KEEP_ALL = has("--all");
 const DOMAIN_FILE = opt("--domain", "");
+const FILE = opt("--file", "");                 // read this local CSV instead of downloading
 
 // Default neuro/behavioral/aging umbrella. Override with --domain domain.json
 // (a JSON array of SCImago category names). Journals whose categories include
@@ -152,11 +159,35 @@ function parseIssns(field) {
 }
 
 // ---- main ----------------------------------------------------------------
-async function main() {
+// SCImago sits behind Cloudflare, which 403s obvious bots (and datacenter IPs,
+// e.g. CI runners). A browser-like header set gets the plain `out=xls` endpoint
+// through from most residential/CI networks; when it doesn't, use --file with a
+// CSV you downloaded from the browser (scimagojr.com › Journal Rankings ›
+// Download data). The data only changes ~yearly, so a committed CSV is fine.
+const BROWSER_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Referer": "https://www.scimagojr.com/journalrank.php"
+};
+
+async function loadTable() {
+  if (FILE) {
+    console.log(`Reading local SCImago CSV: ${FILE}`);
+    return readFileSync(FILE, "utf8");
+  }
   console.log(`Fetching SCImago table: ${SCIMAGO_URL}`);
-  const res = await fetch(SCIMAGO_URL, { headers: { "User-Agent": "lab-impact-widget/1.0 (build script)" } });
-  if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}. If this persists, download the CSV manually from scimagojr.com › Journal Rankings › Download data, and pass it via --file.`);
-  const text = await res.text();
+  const res = await fetch(SCIMAGO_URL, { headers: BROWSER_HEADERS });
+  if (!res.ok) throw new Error(
+    `Download failed: HTTP ${res.status}. SCImago's Cloudflare is likely blocking this network ` +
+    `(common on CI runners). Download the CSV in a browser from scimagojr.com › Journal Rankings › ` +
+    `Download data, commit it, and re-run with:  node build-rankings.mjs --file scimago-source.csv`
+  );
+  return res.text();
+}
+
+async function main() {
+  const text = await loadTable();
 
   const { header, rows } = parseCsv(text);
   const cTitle = col(header, "Title");
@@ -199,7 +230,7 @@ async function main() {
   const output = {
     meta: {
       source: "SCImago Journal Rank (scimagojr.com), Scopus data",
-      url: SCIMAGO_URL,
+      url: FILE ? `file:${FILE}` : SCIMAGO_URL,
       year: YEAR || "latest",
       generated: new Date().toISOString().slice(0, 10),
       scope: KEEP_ALL ? "all journals" : "domain-filtered",

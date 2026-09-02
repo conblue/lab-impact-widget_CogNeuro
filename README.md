@@ -41,14 +41,20 @@ node build-rankings.mjs                 # latest year, neuro/behavioral/aging jo
 # node build-rankings.mjs --year 2024   # a specific SCImago year
 # node build-rankings.mjs --all         # every journal (larger file)
 # node build-rankings.mjs --domain my-categories.json   # custom category list
+# node build-rankings.mjs --file scimago-source.csv     # parse a local CSV, no download
 ```
 
 It prints the domain categories it found (with journal counts) and flags any
 configured category name it *didn't* find — use that to fix spelling against
 SCImago's category filter. Output: `rankings.json`. Host it next to the widget.
 
-> If the direct download is ever blocked, get the CSV manually from
-> scimagojr.com → Journal Rankings → **Download data**, and point the script at it.
+> **SCImago is behind Cloudflare**, which 403s obvious bots and datacenter IPs —
+> so the direct download usually fails on GitHub Actions (and sometimes locally).
+> When it does: open **scimagojr.com → Journal Rankings → Download data** in a
+> browser, save the file as `scimago-source.csv` in the repo root, and commit it.
+> `build-rankings.mjs --file scimago-source.csv` then parses that instead, and the
+> monthly workflow falls back to it automatically. Refresh the CSV once a year
+> when SCImago publishes new data.
 
 ### 2. Configure the widget
 

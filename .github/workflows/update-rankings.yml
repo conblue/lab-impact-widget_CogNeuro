@@ -25,8 +25,22 @@ jobs:
         with:
           node-version: 24
 
+      # SCImago is behind Cloudflare and 403s GitHub's datacenter IPs. Try the
+      # live download; if it fails, fall back to a CSV committed to the repo
+      # (scimago-source.csv) that you refresh from a browser when SCImago updates.
       - name: Rebuild rankings.json
-        run: node build-rankings.mjs --out rankings.json
+        run: |
+          if node build-rankings.mjs --out rankings.json; then
+            echo "Built from live SCImago download."
+          elif [ -f scimago-source.csv ]; then
+            echo "Live download blocked — using committed scimago-source.csv."
+            node build-rankings.mjs --file scimago-source.csv --out rankings.json
+          else
+            echo "::error::Live download blocked and no scimago-source.csv in the repo."
+            echo "Download the CSV from scimagojr.com > Journal Rankings > Download data,"
+            echo "commit it as scimago-source.csv, and re-run this workflow."
+            exit 1
+          fi
 
       - name: Commit if the rankings changed
         run: |
